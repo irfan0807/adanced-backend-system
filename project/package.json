@@ -1,0 +1,51 @@
+{
+  "name": "transaction-microservices-system",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node src/api-gateway/server.js",
+    "start:gateway": "node src/api-gateway/server.js",
+    "start:user": "node src/services/user-service/server.js",
+    "start:account": "node src/services/account-service/server.js",
+    "start:transaction": "node src/services/transaction-service/server.js",
+    "start:payment": "node src/services/payment-service/server.js",
+    "start:notification": "node src/services/notification-service/server.js",
+    "start:audit": "node src/services/audit-service/server.js",
+    "start:analytics": "node src/services/analytics-service/server.js",
+    "start:risk": "node src/services/risk-service/server.js",
+    "start:currency": "node src/services/currency-service/server.js",
+    "start:settlement": "node src/services/settlement-service/server.js",
+    "start:reporting": "node src/services/reporting-service/server.js",
+    "start:eventstore": "node src/services/event-store-service/server.js",
+    "dev": "concurrently \"npm run start:gateway\" \"npm run start:user\" \"npm run start:account\" \"npm run start:transaction\"",
+    "test": "jest"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "helmet": "^7.1.0",
+    "compression": "^1.7.4",
+    "winston": "^3.11.0",
+    "redis": "^4.6.10",
+    "mongodb": "^6.3.0",
+    "mysql2": "^3.6.5",
+    "kafkajs": "^2.2.4",
+    "amqplib": "^0.10.3",
+    "uuid": "^9.0.1",
+    "joi": "^17.11.0",
+    "jsonwebtoken": "^9.0.2",
+    "bcryptjs": "^2.4.3",
+    "axios": "^1.6.2",
+    "http-proxy-middleware": "^2.0.6",
+    "express-rate-limit": "^7.1.5",
+    "generic-pool": "^3.9.0",
+    "node-cron": "^3.0.3",
+    "dotenv": "^16.3.1",
+    "ioredis": "^5.3.2"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2",
+    "jest": "^29.7.0",
+    "nodemon": "^3.0.2"
+  }
+}

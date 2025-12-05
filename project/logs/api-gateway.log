@@ -1,0 +1,2 @@
+{"level":"info","message":"API Gateway running on port 3000","timestamp":"2025-09-07T11:41:35.075Z"}
+{"0":"user","1":"account","10":"reporting","11":"eventstore","2":"transaction","3":"payment","4":"notification","5":"audit","6":"analytics","7":"risk","8":"currency","9":"settlement","level":"info","message":"Registered services:","timestamp":"2025-09-07T11:41:35.077Z"}
