@@ -1,4 +1,5 @@
 import { KafkaService } from '../messaging/kafka-service.js';
+import { RabbitMQService } from '../messaging/rabbitmq-service.js';
 import CircuitBreaker from '../patterns/circuit-breaker.js';
 import RetryWithBackoff from '../patterns/retry-with-backoff.js';
 
@@ -6,6 +7,7 @@ class DualDatabaseWriter {
   constructor(connectionPool) {
     this.connectionPool = connectionPool;
     this.kafkaService = new KafkaService();
+    this.rabbitMQService = new RabbitMQService();
     
     // Circuit breakers for each database
     this.mysqlBreaker = new CircuitBreaker({
@@ -185,7 +187,7 @@ class DualDatabaseWriter {
     });
 
     // Also queue in RabbitMQ for immediate retry
-    // Implementation would go here
+    await this.rabbitMQService.publish('failed-writes-retry', failedWrite);
   }
 
   async publishWriteEvent(writeId, results, data) {

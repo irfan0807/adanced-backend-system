@@ -1,4 +1,4 @@
-# Advanced Patterns & Architecture Guide
+ # Advanced Patterns & Architecture Guide
 
 ## Resilience Patterns Deep Dive
 

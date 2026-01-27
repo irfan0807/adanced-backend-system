@@ -1,10 +1,10 @@
 # Advanced Transaction Microservices System
 
-A comprehensive, production-ready backend transaction system built with Node.js featuring 12 specialized microservices with advanced resilience patterns and distributed system capabilities.
+A comprehensive, production-ready backend transaction system built with Node.js featuring 12 specialized microservices with advanced resilience patterns and distributed system capabilities. Includes a modern Next.js frontend for user interaction.
 
 ## Architecture Overview
 
-### Microservices
+### Backend Microservices
 1. **API Gateway** (Port 3000) - Central routing and load balancing
 2. **User Service** (Port 3001) - User management and authentication
 3. **Account Service** (Port 3002) - Account management and balance tracking
@@ -18,6 +18,68 @@ A comprehensive, production-ready backend transaction system built with Node.js 
 11. **Settlement Service** (Port 3010) - Transaction settlement and reconciliation
 12. **Reporting Service** (Port 3011) - Business intelligence and reports
 13. **Event Store Service** (Port 3012) - Event sourcing and replay capabilities
+
+### Frontend Application
+- **Next.js Frontend** (Port 3001) - Modern React application with TypeScript
+  - User authentication (sign up/sign in)
+  - Account management dashboard
+  - Money deposits and transfers
+  - Transaction history
+  - Responsive design with Tailwind CSS
+
+## Quick Start
+
+### Prerequisites
+- Node.js 18+ and npm
+- (Optional) Kafka, RabbitMQ, MySQL, MongoDB, Redis for production mode
+
+### Startup Scripts
+
+#### For Testing (Recommended)
+```bash
+# Quick test startup - starts essential services with in-memory databases
+./start-test.sh
+
+# Or use the full startup script in test mode
+./start-services.sh
+```
+
+#### For Production
+```bash
+# Full production startup (requires external services)
+NODE_ENV=production ./start-services.sh
+
+# Or start individual services
+NODE_ENV=production npm run start:gateway
+NODE_ENV=production npm run start:account
+# ... etc
+```
+
+#### Manual Startup
+```bash
+# Install dependencies
+npm install
+npm run install:frontend
+
+# Start services individually (test mode)
+NODE_ENV=test npm run start:account
+NODE_ENV=test npm run start:transaction
+NODE_ENV=test npm run start:payment
+NODE_ENV=test npm run start:gateway
+npm run start:frontend
+```
+
+### Service URLs
+- **Frontend**: http://localhost:3000
+- **API Gateway**: http://localhost:3000/api/*
+- **Health Check**: http://localhost:3000/health
+
+### Test Mode Features
+- ✅ In-memory MySQL and MongoDB (no database installation needed)
+- ✅ In-memory Kafka and RabbitMQ (no message broker needed)
+- ✅ Automatic service discovery and routing
+- ✅ Full CQRS and event sourcing capabilities
+- ✅ Circuit breakers and retry logic active
 
 ## Advanced Patterns Implemented
 
@@ -120,21 +182,32 @@ A comprehensive, production-ready backend transaction system built with Node.js 
 
 ### Installation
 ```bash
-# Install dependencies
+# Install backend dependencies
 npm install
+
+# Install frontend dependencies
+npm run install:frontend
 
 # Set up environment variables
 cp .env.example .env
 
-# Start individual services
+# Start backend services
 npm run start:gateway    # API Gateway
 npm run start:user       # User Service
 npm run start:account    # Account Service
 npm run start:transaction # Transaction Service
 
-# Or start all services in development
+# Start frontend (in another terminal)
+npm run start:frontend
+
+# Or start all services in development (backend + frontend)
 npm run dev
 ```
+
+### Accessing the Application
+- **Frontend**: http://localhost:3001
+- **API Gateway**: http://localhost:3000
+- **Backend Services**: http://localhost:3001-3012
 
 ### Configuration
 Update `.env` file with your database and message queue configurations:

@@ -1,0 +1,4 @@
+{"level":"info","message":"Starting settlement service database migration...","timestamp":"2026-01-27T08:20:47.927Z"}
+{"level":"info","message":"Migration file loaded successfully","timestamp":"2026-01-27T08:20:49.930Z"}
+{"level":"info","message":"Found 7 SQL commands to execute","timestamp":"2026-01-27T08:20:49.931Z"}
+{"level":"info","message":"Executing command 1/7...","timestamp":"2026-01-27T08:20:49.931Z"}
