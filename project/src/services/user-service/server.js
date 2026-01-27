@@ -2,13 +2,13 @@ import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import compression from 'compression';
-import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
-import { v4 as uuidv4 } from 'uuid';
+import winston from 'winston';
 import DatabaseConnectionPool from '../../shared/database/connection-pool.js';
 import DualDatabaseWriter from '../../shared/database/dual-writer.js';
+import EventStore from '../../shared/event-sourcing/event-store.js';
 import { KafkaService } from '../../shared/messaging/kafka-service.js';
-import winston from 'winston';
+import { UserService } from './user-service.js';
 
 const app = express();
 const PORT = process.env.USER_SERVICE_PORT || 3001;
@@ -30,6 +30,18 @@ const logger = winston.createLogger({
 const connectionPool = new DatabaseConnectionPool();
 const kafkaService = new KafkaService();
 const dualWriter = new DualDatabaseWriter(connectionPool);
+const eventStore = new EventStore(connectionPool, kafkaService);
+
+const dependencies = {
+  connectionPool,
+  dualWriter,
+  eventStore,
+  kafkaService,
+  logger
+};
+
+// Initialize UserService
+const userService = new UserService(dependencies);
 
 // Middleware
 app.use(helmet());
@@ -46,7 +58,7 @@ const authenticateToken = (req, res, next) => {
     return res.status(401).json({ error: 'Access token required' });
   }
 
-  jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
+  jwt.verify(token, process.env.JWT_SECRET || 'default-secret', (err, user) => {
     if (err) {
       return res.status(403).json({ error: 'Invalid token' });
     }
@@ -56,9 +68,11 @@ const authenticateToken = (req, res, next) => {
 };
 
 // Routes
+
+// Authentication routes
 app.post('/register', async (req, res) => {
   try {
-    const { email, password, firstName, lastName, phoneNumber } = req.body;
+    const { email, password, firstName, lastName, phoneNumber, dateOfBirth, address, preferences } = req.body;
 
     // Validate input
     if (!email || !password || !firstName || !lastName) {
@@ -68,51 +82,21 @@ app.post('/register', async (req, res) => {
       });
     }
 
-    // Check if user exists
-    const existingUser = await getUserByEmail(email);
-    if (existingUser) {
-      return res.status(409).json({
-        success: false,
-        error: 'User already exists'
-      });
-    }
-
-    // Hash password
-    const hashedPassword = await bcrypt.hash(password, 12);
-
-    // Create user
-    const user = {
-      id: uuidv4(),
+    const result = await userService.createUser({
       email,
-      password: hashedPassword,
+      password,
       firstName,
       lastName,
       phoneNumber,
-      status: 'active',
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
-    };
-
-    // Write to databases
-    await dualWriter.writeToAllDatabases(user);
-
-    // Publish user created event
-    await kafkaService.produce('user-events', {
-      key: user.id,
-      value: JSON.stringify({
-        eventType: 'USER_CREATED',
-        userId: user.id,
-        email: user.email,
-        timestamp: new Date().toISOString()
-      })
+      dateOfBirth,
+      address,
+      preferences,
+      metadata: { source: 'api' }
     });
-
-    // Remove password from response
-    const { password: _, ...userResponse } = user;
 
     res.status(201).json({
       success: true,
-      data: userResponse,
+      data: result,
       timestamp: new Date().toISOString()
     });
   } catch (error) {
@@ -135,60 +119,11 @@ app.post('/login', async (req, res) => {
       });
     }
 
-    // Get user
-    const user = await getUserByEmail(email);
-    if (!user) {
-      return res.status(401).json({
-        success: false,
-        error: 'Invalid credentials'
-      });
-    }
-
-    // Check password
-    const isValidPassword = await bcrypt.compare(password, user.password);
-    if (!isValidPassword) {
-      return res.status(401).json({
-        success: false,
-        error: 'Invalid credentials'
-      });
-    }
-
-    // Check user status
-    if (user.status !== 'active') {
-      return res.status(403).json({
-        success: false,
-        error: 'Account is suspended'
-      });
-    }
-
-    // Generate JWT
-    const token = jwt.sign(
-      { userId: user.id, email: user.email },
-      process.env.JWT_SECRET,
-      { expiresIn: process.env.JWT_EXPIRES_IN || '24h' }
-    );
-
-    // Update last login
-    await updateUserLastLogin(user.id);
-
-    // Publish login event
-    await kafkaService.produce('user-events', {
-      key: user.id,
-      value: JSON.stringify({
-        eventType: 'USER_LOGIN',
-        userId: user.id,
-        timestamp: new Date().toISOString()
-      })
-    });
-
-    const { password: _, ...userResponse } = user;
+    const result = await userService.authenticateUser(email, password);
 
     res.json({
       success: true,
-      data: {
-        user: userResponse,
-        token
-      },
+      data: result,
       timestamp: new Date().toISOString()
     });
   } catch (error) {
@@ -200,21 +135,14 @@ app.post('/login', async (req, res) => {
   }
 });
 
+// User profile routes
 app.get('/profile', authenticateToken, async (req, res) => {
   try {
-    const user = await getUserById(req.user.userId);
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        error: 'User not found'
-      });
-    }
-
-    const { password: _, ...userResponse } = user;
+    const result = await userService.getUserProfile(req.user.userId);
 
     res.json({
       success: true,
-      data: userResponse,
+      data: result.profile,
       timestamp: new Date().toISOString()
     });
   } catch (error) {
@@ -228,31 +156,19 @@ app.get('/profile', authenticateToken, async (req, res) => {
 
 app.put('/profile', authenticateToken, async (req, res) => {
   try {
-    const { firstName, lastName, phoneNumber } = req.body;
-    const userId = req.user.userId;
+    const { firstName, lastName, phoneNumber, dateOfBirth, address } = req.body;
 
-    const updatedUser = await updateUser(userId, {
+    const result = await userService.updateProfile(req.user.userId, {
       firstName,
       lastName,
       phoneNumber,
-      updatedAt: new Date().toISOString()
-    });
-
-    // Publish user updated event
-    await kafkaService.produce('user-events', {
-      key: userId,
-      value: JSON.stringify({
-        eventType: 'USER_UPDATED',
-        userId,
-        timestamp: new Date().toISOString()
-      })
-    });
-
-    const { password: _, ...userResponse } = updatedUser;
+      dateOfBirth,
+      address
+    }, req.user.userId);
 
     res.json({
       success: true,
-      data: userResponse,
+      data: result,
       timestamp: new Date().toISOString()
     });
   } catch (error) {
@@ -265,74 +181,51 @@ app.put('/profile', authenticateToken, async (req, res) => {
 });
 
 // Health check
-app.get('/health', (req, res) => {
-  res.json({
-    status: 'healthy',
-    service: 'user-service',
-    timestamp: new Date().toISOString()
-  });
+app.get('/health', async (req, res) => {
+  try {
+    const health = await userService.healthCheck();
+    res.json({
+      ...health,
+      service: 'user-service',
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    logger.error('Health check failed:', error);
+    res.status(500).json({
+      status: 'unhealthy',
+      service: 'user-service',
+      error: error.message,
+      timestamp: new Date().toISOString()
+    });
+  }
 });
-
-// Helper functions
-async function getUserByEmail(email) {
-  try {
-    const db = connectionPool.getMongoDatabase();
-    return await db.collection('users').findOne({ email });
-  } catch (error) {
-    // Fallback to MySQL
-    return await connectionPool.executeWithMySQLConnection(async (connection) => {
-      const [rows] = await connection.execute(
-        'SELECT * FROM users WHERE email = ?',
-        [email]
-      );
-      return rows[0] || null;
-    });
-  }
-}
-
-async function getUserById(id) {
-  try {
-    const db = connectionPool.getMongoDatabase();
-    return await db.collection('users').findOne({ id });
-  } catch (error) {
-    // Fallback to MySQL
-    return await connectionPool.executeWithMySQLConnection(async (connection) => {
-      const [rows] = await connection.execute(
-        'SELECT * FROM users WHERE id = ?',
-        [id]
-      );
-      return rows[0] || null;
-    });
-  }
-}
-
-async function updateUser(id, updates) {
-  const userData = { id, ...updates };
-  await dualWriter.writeToAllDatabases(userData);
-  return await getUserById(id);
-}
-
-async function updateUserLastLogin(userId) {
-  const lastLogin = new Date().toISOString();
-  await dualWriter.writeToAllDatabases({ 
-    id: userId, 
-    lastLogin,
-    updatedAt: lastLogin
-  });
-}
 
 // Initialize service
 async function initializeService() {
   try {
     await connectionPool.initialize();
     await kafkaService.initialize();
-    
+    await eventStore.initialize();
+
     logger.info(`User Service started on port ${PORT}`);
   } catch (error) {
     logger.error('Failed to initialize User Service:', error);
     process.exit(1);
   }
 }
+
+// Graceful shutdown
+process.on('SIGTERM', async () => {
+  logger.info('SIGTERM received, shutting down gracefully...');
+  await userService.cleanup();
+  process.exit(0);
+});
+
+process.on('SIGINT', async () => {
+  logger.info('SIGINT received, shutting down gracefully...');
+  await userService.cleanup();
+  process.exit(0);
+});
 
 app.listen(PORT, () => {
   initializeService();

@@ -1,0 +1,14 @@
+{"level":"info","message":"Account Service started on port 3002","timestamp":"2026-01-26T07:44:51.185Z"}
+{"cause":{"broker":"localhost:9092","code":"ECONNREFUSED","name":"KafkaJSConnectionError","retriable":true},"level":"error","message":"Failed to initialize Account Service: Connection error: connect ECONNREFUSED 127.0.0.1:9092","name":"KafkaJSNumberOfRetriesExceeded","retriable":false,"retryCount":15,"retryTime":1000,"stack":"KafkaJSNonRetriableError\n  Caused by: KafkaJSConnectionError: Connection error: connect ECONNREFUSED 127.0.0.1:9092\n    at Socket.onError (/home/shaik-irfan/Desktop/BACKEND_SYSTEM/Advanced Transaction Microservices System/project/node_modules/kafkajs/src/network/connection.js:210:23)\n    at Socket.emit (node:events:524:28)\n    at emitErrorNT (node:internal/streams/destroy:169:8)\n    at emitErrorCloseNT (node:internal/streams/destroy:128:3)\n    at process.processTicksAndRejections (node:internal/process/task_queues:82:21)","timestamp":"2026-01-26T07:50:06.381Z"}
+{"level":"info","message":"Account Service started on port 3002","timestamp":"2026-01-26T07:52:41.066Z"}
+{"level":"info","message":"Account Service started on port 3002","timestamp":"2026-01-26T07:54:11.956Z"}
+{"level":"info","message":"Account Service started on port 3002","timestamp":"2026-01-26T07:57:37.793Z"}
+{"level":"info","message":"Account Service started on port 3002","timestamp":"2026-01-26T08:07:48.223Z"}
+{"level":"info","message":"Account Service started on port 3002","timestamp":"2026-01-26T08:17:20.176Z"}
+{"level":"info","message":"Account Service started on port 3002","timestamp":"2026-01-26T08:29:36.427Z"}
+{"level":"info","message":"Account Service started on port 3002","timestamp":"2026-01-26T08:33:45.761Z"}
+{"level":"info","message":"Account Service started on port 3002","timestamp":"2026-01-26T08:36:52.829Z"}
+{"level":"info","message":"Account Service started on port 3002","timestamp":"2026-01-26T08:39:25.234Z"}
+{"level":"info","message":"Account Service started on port 3002","timestamp":"2026-01-26T08:41:30.770Z"}
+{"level":"info","message":"Account Service started on port 3002","timestamp":"2026-01-27T07:17:26.028Z"}
+{"level":"info","message":"Account Service started on port 3002","timestamp":"2026-01-27T07:28:46.617Z"}
