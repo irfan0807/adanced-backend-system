@@ -5,9 +5,6 @@ import compression from 'compression';
 import { v4 as uuidv4 } from 'uuid';
 import { CurrencyService } from './currency-service.js';
 import winston from 'winston';
-import { DatabaseConnectionPool } from '../../shared/database/connection-pool.js';
-import { KafkaService } from '../../shared/messaging/kafka-service.js';
-import { DualDatabaseWriter } from '../../shared/database/dual-writer.js';
 
 const app = express();
 const PORT = process.env.CURRENCY_SERVICE_PORT || 3009;
@@ -16,7 +13,7 @@ const PORT = process.env.CURRENCY_SERVICE_PORT || 3009;
 const logger = winston.createLogger({
   level: 'info',
   format: winston.format.combine(
-    winston.format.timestamp(),
+    winston.format.timestamp,
     winston.format.json()
   ),
   transports: [
@@ -25,22 +22,31 @@ const logger = winston.createLogger({
   ]
 });
 
-// Initialize dependencies
-const connectionPool = new DatabaseConnectionPool();
-const kafkaService = new KafkaService();
-const dualWriter = new DualDatabaseWriter(connectionPool);
-
 // Initialize Currency Service
 const currencyService = new CurrencyService({
-  connectionPool,
-  kafkaService,
-  dualWriter,
-  logger
+  kafka: {
+    brokers: process.env.KAFKA_BROKERS?.split(',') || ['localhost:9092'],
+    clientId: 'currency-service'
+  },
+  database: {
+    mysql: {
+      host: process.env.DB_HOST || 'localhost',
+      user: process.env.DB_USER || 'root',
+      password: process.env.DB_PASSWORD || '',
+      database: process.env.DB_NAME || 'currency_db'
+    },
+    mongodb: {
+      url: process.env.MONGODB_URL || 'mongodb://localhost:27017/currency_db'
+    }
+  },
+  eventStore: {
+    url: process.env.EVENTSTORE_URL || 'localhost:2113'
+  },
+  externalApi: {
+    fixerApiKey: process.env.FIXER_API_KEY,
+    baseUrl: process.env.EXTERNAL_API_URL
+  }
 });
-
-// In-memory cache for exchange rates
-const exchangeRateCache = new Map();
-const CACHE_DURATION = 5 * 60 * 1000; // 5 minutes
 
 // Middleware
 app.use(helmet());
@@ -299,7 +305,7 @@ app.post('/currencies', async (req, res) => {
       currencyCode,
       currencyName,
       symbol,
- decimalPlaces,
+      decimalPlaces,
       addedBy
     );
 
