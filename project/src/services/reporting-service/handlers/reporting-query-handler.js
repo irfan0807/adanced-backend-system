@@ -898,31 +898,80 @@ export class ReportingQueryHandler {
   }
 
   async executeMongoQuery(dataSource, query) {
-    // Implementation for MongoDB queries
     try {
-      const { collection, filter = {}, projection = {}, sort = {}, limit = 1000 } = query;
+      const { collection, filter = {}, projection = {}, sort = {}, limit = 1000, aggregations } = query;
+      const startTime = Date.now();
 
-      // This would connect to MongoDB and execute the query
-      // For now, return mock data structure
-      const mockData = {
-        data: [
-          { id: 'mock-1', amount: 100.50, status: 'completed', created_at: new Date() },
-          { id: 'mock-2', amount: 250.75, status: 'pending', created_at: new Date() }
-        ],
-        executionTime: Math.floor(Math.random() * 100) + 10,
-        metadata: {
-          totalDocuments: 2,
-          collection: collection,
-          query: filter
+      const db = this.connectionPool.getMongoDatabase();
+      let mongoCollection = db.collection(collection || dataSource.collection);
+
+      let result;
+      let total = 0;
+
+      if (aggregations && aggregations.length > 0) {
+        // Build aggregation pipeline
+        const pipeline = [];
+
+        // Add match stage if filters exist
+        if (Object.keys(filter).length > 0) {
+          pipeline.push({ $match: filter });
         }
-      };
+
+        // Add group stage for aggregations
+        const groupStage = { _id: null };
+        aggregations.forEach(agg => {
+          switch (agg.operation) {
+            case 'count':
+              groupStage[`${agg.alias || agg.field}_count`] = { $sum: 1 };
+              break;
+            case 'sum':
+              groupStage[`${agg.alias || agg.field}_sum`] = { $sum: `$${agg.field}` };
+              break;
+            case 'avg':
+              groupStage[`${agg.alias || agg.field}_avg`] = { $avg: `$${agg.field}` };
+              break;
+            case 'min':
+              groupStage[`${agg.alias || agg.field}_min`] = { $min: `$${agg.field}` };
+              break;
+            case 'max':
+              groupStage[`${agg.alias || agg.field}_max`] = { $max: `$${agg.field}` };
+              break;
+          }
+        });
+        pipeline.push({ $group: groupStage });
+
+        result = await mongoCollection.aggregate(pipeline).toArray();
+      } else {
+        // Regular find query
+        const cursor = mongoCollection.find(filter, { projection });
+
+        if (Object.keys(sort).length > 0) {
+          cursor.sort(sort);
+        }
+
+        cursor.limit(limit);
+        result = await cursor.toArray();
+        total = await mongoCollection.countDocuments(filter);
+      }
+
+      const executionTime = Date.now() - startTime;
 
       this.logger.info(`Executed MongoDB query on collection: ${collection}`, {
         filter,
-        executionTime: mockData.executionTime
+        executionTime,
+        resultCount: result.length
       });
 
-      return mockData;
+      return {
+        data: result,
+        total: total || result.length,
+        executionTime,
+        metadata: {
+          collection: collection || dataSource.collection,
+          query: filter,
+          aggregations: aggregations || []
+        }
+      };
     } catch (error) {
       this.logger.error('Error executing MongoDB query:', error);
       throw error;
@@ -1158,36 +1207,66 @@ export class ReportingQueryHandler {
 
   async executeSQLQuery(table, query) {
     try {
-      const { operation, field, filters = {}, groupBy, limit = 1000 } = query;
+      const { operation, field, filters = {}, groupBy, limit = 1000, aggregations } = query;
 
       // Build SQL query dynamically
       let sql = `SELECT `;
       let params = [];
+      let selectFields = [];
 
-      if (operation && field) {
+      // Handle aggregations if provided
+      if (aggregations && aggregations.length > 0) {
+        aggregations.forEach(agg => {
+          switch (agg.operation) {
+            case 'count':
+              selectFields.push(`COUNT(${agg.field}) as ${agg.alias || agg.field}_count`);
+              break;
+            case 'sum':
+              selectFields.push(`SUM(${agg.field}) as ${agg.alias || agg.field}_sum`);
+              break;
+            case 'avg':
+              selectFields.push(`AVG(${agg.field}) as ${agg.alias || agg.field}_avg`);
+              break;
+            case 'min':
+              selectFields.push(`MIN(${agg.field}) as ${agg.alias || agg.field}_min`);
+              break;
+            case 'max':
+              selectFields.push(`MAX(${agg.field}) as ${agg.alias || agg.field}_max`);
+              break;
+            default:
+              selectFields.push(agg.field);
+          }
+        });
+        
+        if (groupBy) {
+          selectFields.unshift(groupBy);
+        }
+      } else if (operation && field) {
+        // Legacy single operation format
         switch (operation) {
           case 'count':
-            sql += `COUNT(${field}) as value`;
+            selectFields.push(`COUNT(${field}) as value`);
             break;
           case 'sum':
-            sql += `SUM(${field}) as value`;
+            selectFields.push(`SUM(${field}) as value`);
             break;
           case 'avg':
-            sql += `AVG(${field}) as value`;
+            selectFields.push(`AVG(${field}) as value`);
             break;
           case 'min':
-            sql += `MIN(${field}) as value`;
+            selectFields.push(`MIN(${field}) as value`);
             break;
           case 'max':
-            sql += `MAX(${field}) as value`;
+            selectFields.push(`MAX(${field}) as value`);
             break;
           default:
-            sql += `*`;
+            selectFields.push('*');
         }
       } else {
-        sql += `*`;
+        selectFields.push('*');
       }
 
+      sql += selectFields.join(', ');
       sql += ` FROM ${table}`;
 
       // Add WHERE clause
@@ -1206,6 +1285,11 @@ export class ReportingQueryHandler {
       // Add GROUP BY
       if (groupBy) {
         sql += ` GROUP BY ${groupBy}`;
+      }
+
+      // Add ORDER BY for consistent results
+      if (groupBy) {
+        sql += ` ORDER BY ${groupBy}`;
       }
 
       // Add LIMIT

@@ -2,9 +2,13 @@ import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import compression from 'compression';
-import { v4 as uuidv4 } from 'uuid';
 import DatabaseConnectionPool from '../../shared/database/connection-pool.js';
+import DualDatabaseWriter from '../../shared/database/dual-writer.js';
 import { KafkaService } from '../../shared/messaging/kafka-service.js';
+import EventStore from '../../shared/event-sourcing/event-store.js';
+import CommandBus from '../../shared/cqrs/command-bus.js';
+import QueryBus from '../../shared/cqrs/query-bus.js';
+import { AccountService } from './account-service.js';
 import winston from 'winston';
 
 const app = express();
@@ -26,6 +30,21 @@ const logger = winston.createLogger({
 // Initialize dependencies
 const connectionPool = new DatabaseConnectionPool();
 const kafkaService = new KafkaService();
+const dualWriter = new DualDatabaseWriter(connectionPool);
+const eventStore = new EventStore(connectionPool, kafkaService);
+const commandBus = new CommandBus();
+const queryBus = new QueryBus();
+
+// Initialize Account Service
+const accountService = new AccountService({
+  connectionPool,
+  dualWriter,
+  eventStore,
+  kafkaService,
+  commandBus,
+  queryBus,
+  logger
+});
 
 // Middleware
 app.use(helmet());
@@ -33,51 +52,49 @@ app.use(cors());
 app.use(compression());
 app.use(express.json({ limit: '10mb' }));
 
+// Request logging middleware
+app.use((req, res, next) => {
+  logger.info(`${req.method} ${req.path}`, {
+    ip: req.ip,
+    userAgent: req.get('User-Agent'),
+    body: req.method !== 'GET' ? req.body : undefined
+  });
+  next();
+});
+
 // Routes
+
+// Account CRUD Routes
 app.post('/accounts', async (req, res) => {
   try {
-    const { userId, accountType, currency } = req.body;
-
-    // Create account logic here
-    const accountId = uuidv4();
-    const account = {
-      id: accountId,
+    const {
+      id,
       userId,
-      accountType: accountType || 'checking',
+      accountType,
+      currency,
+      initialBalance,
+      accountName,
+      description,
+      metadata
+    } = req.body;
+
+    if (!userId || !accountType) {
+      return res.status(400).json({
+        success: false,
+        error: 'userId and accountType are required',
+        timestamp: new Date().toISOString()
+      });
+    }
+
+    const account = await accountService.createAccount({
+      id,
+      userId,
+      accountType,
       currency: currency || 'USD',
-      balance: 0,
-      status: 'active',
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
-    };
-
-    // Insert into MySQL
-    await connectionPool.executeWithMySQLConnection(async (connection) => {
-      await connection.execute(
-        'INSERT INTO accounts (id, user_id, account_type, currency, balance, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, NOW(), NOW())',
-        [account.id, account.userId, account.accountType, account.currency, account.balance, account.status]
-      );
-    });
-
-    // Insert into MongoDB
-    const mongoDB = connectionPool.getMongoDatabase();
-    await mongoDB.collection('accounts').insertOne({
-      id: account.id,
-      userId: account.userId,
-      accountType: account.accountType,
-      currency: account.currency,
-      balance: account.balance,
-      status: account.status,
-      createdAt: new Date(),
-      updatedAt: new Date()
-    });
-
-    // Publish account created event
-    await kafkaService.produce('account-events', {
-      eventType: 'ACCOUNT_CREATED',
-      accountId: account.id,
-      userId: account.userId,
-      timestamp: new Date().toISOString()
+      initialBalance: initialBalance || 0,
+      accountName,
+      description,
+      metadata
     });
 
     res.status(201).json({
@@ -95,13 +112,53 @@ app.post('/accounts', async (req, res) => {
   }
 });
 
-app.get('/accounts', async (req, res) => {
+app.get('/accounts/:id', async (req, res) => {
   try {
-    const { page = 1, limit = 20, status } = req.query;
-    const accounts = await getAllAccounts({ page: parseInt(page), limit: parseInt(limit), status });
+    const account = await accountService.getAccount(req.params.id);
     res.json({
       success: true,
-      data: accounts,
+      data: account,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    logger.error('Error getting account:', error);
+    if (error.message === 'Account not found') {
+      res.status(404).json({
+        success: false,
+        error: error.message,
+        timestamp: new Date().toISOString()
+      });
+    } else {
+      res.status(500).json({
+        success: false,
+        error: error.message,
+        timestamp: new Date().toISOString()
+      });
+    }
+  }
+});
+
+app.get('/accounts', async (req, res) => {
+  try {
+    const {
+      userId,
+      accountType,
+      currency,
+      status,
+      page = 1,
+      limit = 10
+    } = req.query;
+
+    const filters = {};
+    if (userId) filters.userId = userId;
+    if (accountType) filters.accountType = accountType;
+    if (currency) filters.currency = currency;
+    if (status) filters.status = status;
+
+    const result = await accountService.getAccounts(filters, parseInt(page), parseInt(limit));
+    res.json({
+      success: true,
+      data: result,
       timestamp: new Date().toISOString()
     });
   } catch (error) {
@@ -114,18 +171,26 @@ app.get('/accounts', async (req, res) => {
   }
 });
 
-app.get('/accounts/user/:userId', async (req, res) => {
+app.put('/accounts/:id', async (req, res) => {
   try {
-    const { page = 1, limit = 20 } = req.query;
-    // Get user accounts logic here
-    const accounts = await getAccountsByUserId(req.params.userId, { page: parseInt(page), limit: parseInt(limit) });
+    const { updates, updatedBy } = req.body;
+
+    if (!updates || !updatedBy) {
+      return res.status(400).json({
+        success: false,
+        error: 'updates and updatedBy are required',
+        timestamp: new Date().toISOString()
+      });
+    }
+
+    const account = await accountService.updateAccount(req.params.id, { ...updates, updatedBy });
     res.json({
       success: true,
-      data: accounts,
+      data: account,
       timestamp: new Date().toISOString()
     });
   } catch (error) {
-    logger.error('Error getting user accounts:', error);
+    logger.error('Error updating account:', error);
     res.status(500).json({
       success: false,
       error: error.message,
@@ -134,27 +199,336 @@ app.get('/accounts/user/:userId', async (req, res) => {
   }
 });
 
-app.put('/accounts/:id/status', async (req, res) => {
+// Account Status Routes
+app.put('/accounts/:id/suspend', async (req, res) => {
   try {
-    const { status } = req.body;
-    if (!['active', 'inactive', 'suspended'].includes(status)) {
+    const { reason, suspendedBy } = req.body;
+
+    if (!suspendedBy) {
       return res.status(400).json({
         success: false,
-        error: 'Invalid status. Must be active, inactive, or suspended',
+        error: 'suspendedBy is required',
         timestamp: new Date().toISOString()
       });
     }
 
-    // Update status logic here
-    const account = await updateAccountStatus(req.params.id, status);
-
+    const account = await accountService.suspendAccount(req.params.id, reason, suspendedBy);
     res.json({
       success: true,
       data: account,
       timestamp: new Date().toISOString()
     });
   } catch (error) {
-    logger.error('Error updating account status:', error);
+    logger.error('Error suspending account:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      timestamp: new Date().toISOString()
+    });
+  }
+});
+
+app.put('/accounts/:id/activate', async (req, res) => {
+  try {
+    const { activatedBy } = req.body;
+
+    if (!activatedBy) {
+      return res.status(400).json({
+        success: false,
+        error: 'activatedBy is required',
+        timestamp: new Date().toISOString()
+      });
+    }
+
+    const account = await accountService.activateAccount(req.params.id, activatedBy);
+    res.json({
+      success: true,
+      data: account,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    logger.error('Error activating account:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      timestamp: new Date().toISOString()
+    });
+  }
+});
+
+app.put('/accounts/:id/close', async (req, res) => {
+  try {
+    const { reason, closedBy } = req.body;
+
+    if (!closedBy) {
+      return res.status(400).json({
+        success: false,
+        error: 'closedBy is required',
+        timestamp: new Date().toISOString()
+      });
+    }
+
+    const account = await accountService.closeAccount(req.params.id, reason, closedBy);
+    res.json({
+      success: true,
+      data: account,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    logger.error('Error closing account:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      timestamp: new Date().toISOString()
+    });
+  }
+});
+
+// Transaction Routes
+app.post('/accounts/:id/deposit', async (req, res) => {
+  try {
+    const { amount, currency, description, reference, depositedBy } = req.body;
+
+    if (!amount || !depositedBy) {
+      return res.status(400).json({
+        success: false,
+        error: 'amount and depositedBy are required',
+        timestamp: new Date().toISOString()
+      });
+    }
+
+    const result = await accountService.depositFunds(
+      req.params.id,
+      amount,
+      currency || 'USD',
+      description,
+      reference,
+      depositedBy
+    );
+
+    res.json({
+      success: true,
+      data: result,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    logger.error('Error depositing funds:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      timestamp: new Date().toISOString()
+    });
+  }
+});
+
+app.post('/accounts/:id/withdraw', async (req, res) => {
+  try {
+    const { amount, currency, description, reference, withdrawnBy } = req.body;
+
+    if (!amount || !withdrawnBy) {
+      return res.status(400).json({
+        success: false,
+        error: 'amount and withdrawnBy are required',
+        timestamp: new Date().toISOString()
+      });
+    }
+
+    const result = await accountService.withdrawFunds(
+      req.params.id,
+      amount,
+      currency || 'USD',
+      description,
+      reference,
+      withdrawnBy
+    );
+
+    res.json({
+      success: true,
+      data: result,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    logger.error('Error withdrawing funds:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      timestamp: new Date().toISOString()
+    });
+  }
+});
+
+app.post('/accounts/transfer', async (req, res) => {
+  try {
+    const {
+      fromAccountId,
+      toAccountId,
+      amount,
+      currency,
+      description,
+      reference,
+      transferredBy
+    } = req.body;
+
+    if (!fromAccountId || !toAccountId || !amount || !transferredBy) {
+      return res.status(400).json({
+        success: false,
+        error: 'fromAccountId, toAccountId, amount, and transferredBy are required',
+        timestamp: new Date().toISOString()
+      });
+    }
+
+    const result = await accountService.transferFunds(
+      fromAccountId,
+      toAccountId,
+      amount,
+      currency || 'USD',
+      description,
+      reference,
+      transferredBy
+    );
+
+    res.json({
+      success: true,
+      data: result,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    logger.error('Error transferring funds:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      timestamp: new Date().toISOString()
+    });
+  }
+});
+
+// Query Routes
+app.get('/accounts/:id/balance', async (req, res) => {
+  try {
+    const balance = await accountService.getAccountBalance(req.params.id);
+    res.json({
+      success: true,
+      data: balance,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    logger.error('Error getting account balance:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      timestamp: new Date().toISOString()
+    });
+  }
+});
+
+app.get('/accounts/:id/transactions', async (req, res) => {
+  try {
+    const {
+      startDate,
+      endDate,
+      page = 1,
+      limit = 20
+    } = req.query;
+
+    const result = await accountService.getAccountTransactions(
+      req.params.id,
+      startDate,
+      endDate,
+      parseInt(page),
+      parseInt(limit)
+    );
+
+    res.json({
+      success: true,
+      data: result,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    logger.error('Error getting account transactions:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      timestamp: new Date().toISOString()
+    });
+  }
+});
+
+app.get('/accounts/:id/statement', async (req, res) => {
+  try {
+    const { startDate, endDate } = req.query;
+
+    if (!startDate || !endDate) {
+      return res.status(400).json({
+        success: false,
+        error: 'startDate and endDate are required',
+        timestamp: new Date().toISOString()
+      });
+    }
+
+    const statement = await accountService.getAccountStatement(
+      req.params.id,
+      startDate,
+      endDate
+    );
+
+    res.json({
+      success: true,
+      data: statement,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    logger.error('Error getting account statement:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      timestamp: new Date().toISOString()
+    });
+  }
+});
+
+app.get('/accounts/summary/user/:userId', async (req, res) => {
+  try {
+    const summary = await accountService.getAccountSummary(req.params.userId);
+    res.json({
+      success: true,
+      data: summary,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    logger.error('Error getting account summary:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      timestamp: new Date().toISOString()
+    });
+  }
+});
+
+app.post('/accounts/validate-transfer', async (req, res) => {
+  try {
+    const { fromAccountId, toAccountId, amount } = req.body;
+
+    if (!fromAccountId || !toAccountId || !amount) {
+      return res.status(400).json({
+        success: false,
+        error: 'fromAccountId, toAccountId, and amount are required',
+        timestamp: new Date().toISOString()
+      });
+    }
+
+    const validation = await accountService.validateAccountTransfer(
+      fromAccountId,
+      toAccountId,
+      amount
+    );
+
+    res.json({
+      success: true,
+      data: validation,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    logger.error('Error validating transfer:', error);
     res.status(500).json({
       success: false,
       error: error.message,
@@ -184,261 +558,12 @@ app.get('/metrics', (req, res) => {
   });
 });
 
-// Helper functions (implement database queries)
-async function getAccountById(accountId) {
-  try {
-    // Try MySQL first (primary)
-    const mysqlResult = await connectionPool.executeWithMySQLConnection(async (connection) => {
-      const [rows] = await connection.execute(
-        'SELECT * FROM accounts WHERE id = ? AND status = "active"',
-        [accountId]
-      );
-      return rows[0];
-    });
-
-    if (mysqlResult) {
-      return mysqlResult;
-    }
-
-    // Fallback to MongoDB
-    const mongoDB = connectionPool.getMongoDatabase();
-    const mongoResult = await mongoDB.collection('accounts').findOne({
-      id: accountId,
-      status: 'active'
-    });
-
-    return mongoResult;
-  } catch (error) {
-    logger.error('Error getting account by ID:', error);
-    throw error;
-  }
-}
-
-async function getAccountsByUserId(userId, options = {}) {
-  try {
-    const { page = 1, limit = 20 } = options;
-    const offset = (page - 1) * limit;
-
-    // Try MySQL first (primary)
-    const mysqlResult = await connectionPool.executeWithMySQLConnection(async (connection) => {
-      const [rows] = await connection.execute(
-        'SELECT * FROM accounts WHERE user_id = ? AND status = "active" ORDER BY created_at DESC LIMIT ? OFFSET ?',
-        [userId, limit, offset]
-      );
-      return rows;
-    });
-
-    if (mysqlResult && mysqlResult.length > 0) {
-      return mysqlResult;
-    }
-
-    // Fallback to MongoDB
-    const mongoDB = connectionPool.getMongoDatabase();
-    const mongoResult = await mongoDB.collection('accounts')
-      .find({
-        userId: userId,
-        status: 'active'
-      })
-      .sort({ createdAt: -1 })
-      .limit(limit)
-      .skip(offset)
-      .toArray();
-
-    return mongoResult;
-  } catch (error) {
-    logger.error('Error getting accounts by user ID:', error);
-    throw error;
-  }
-}
-
-async function getAllAccounts(options = {}) {
-  try {
-    const { page = 1, limit = 20, status } = options;
-    const offset = (page - 1) * limit;
-
-    let whereClause = '';
-    let params = [limit, offset];
-    if (status) {
-      whereClause = 'WHERE status = ?';
-      params = [status, limit, offset];
-    }
-
-    // Try MySQL first (primary)
-    const mysqlResult = await connectionPool.executeWithMySQLConnection(async (connection) => {
-      const [rows] = await connection.execute(
-        `SELECT * FROM accounts ${whereClause} ORDER BY created_at DESC LIMIT ? OFFSET ?`,
-        params
-      );
-      return rows;
-    });
-
-    if (mysqlResult && mysqlResult.length > 0) {
-      return mysqlResult;
-    }
-
-    // Fallback to MongoDB
-    const mongoDB = connectionPool.getMongoDatabase();
-    const query = status ? { status } : {};
-    const mongoResult = await mongoDB.collection('accounts')
-      .find(query)
-      .sort({ createdAt: -1 })
-      .limit(limit)
-      .skip(offset)
-      .toArray();
-
-    return mongoResult;
-  } catch (error) {
-    logger.error('Error getting all accounts:', error);
-    throw error;
-  }
-}
-
-async function updateAccountBalance(accountId, amount, operation) {
-  try {
-    // Get current account
-    const account = await getAccountById(accountId);
-    if (!account) {
-      throw new Error('Account not found');
-    }
-
-    let newBalance = parseFloat(account.balance || 0);
-    const changeAmount = parseFloat(amount);
-
-    // Calculate new balance based on operation
-    if (operation === 'credit') {
-      newBalance += changeAmount;
-    } else if (operation === 'debit') {
-      newBalance -= changeAmount;
-      if (newBalance < 0) {
-        throw new Error('Insufficient funds');
-      }
-    } else {
-      throw new Error('Invalid operation type');
-    }
-
-    // Update in both databases
-    const updatedAccount = {
-      ...account,
-      balance: newBalance,
-      updatedAt: new Date().toISOString()
-    };
-
-    // Update MySQL
-    await connectionPool.executeWithMySQLConnection(async (connection) => {
-      await connection.beginTransaction();
-      try {
-        await connection.execute(
-          'UPDATE accounts SET balance = ?, updated_at = NOW() WHERE id = ?',
-          [newBalance, accountId]
-        );
-
-        // Log balance change
-        await connection.execute(
-          'INSERT INTO account_balance_changes (account_id, previous_balance, new_balance, change_amount, operation, created_at) VALUES (?, ?, ?, ?, ?, NOW())',
-          [accountId, account.balance, newBalance, changeAmount, operation]
-        );
-
-        await connection.commit();
-      } catch (error) {
-        await connection.rollback();
-        throw error;
-      }
-    });
-
-    // Update MongoDB
-    const mongoDB = connectionPool.getMongoDatabase();
-    await mongoDB.collection('accounts').updateOne(
-      { id: accountId },
-      {
-        $set: {
-          balance: newBalance,
-          updatedAt: new Date()
-        },
-        $push: {
-          balanceChanges: {
-            previousBalance: account.balance,
-            newBalance,
-            changeAmount,
-            operation,
-            timestamp: new Date()
-          }
-        }
-      }
-    );
-
-    // Publish balance updated event
-    await kafkaService.produce('account-events', {
-      eventType: 'ACCOUNT_BALANCE_UPDATED',
-      accountId: accountId,
-      previousBalance: account.balance,
-      newBalance: newBalance,
-      changeAmount: changeAmount,
-      operation: operation,
-      timestamp: new Date().toISOString()
-    });
-
-    return updatedAccount;
-  } catch (error) {
-    logger.error('Error updating account balance:', error);
-    throw error;
-  }
-}
-
-async function updateAccountStatus(accountId, status) {
-  try {
-    // Get current account
-    const account = await getAccountById(accountId);
-    if (!account) {
-      throw new Error('Account not found');
-    }
-
-    // Update in MySQL
-    await connectionPool.executeWithMySQLConnection(async (connection) => {
-      await connection.execute(
-        'UPDATE accounts SET status = ?, updated_at = NOW() WHERE id = ?',
-        [status, accountId]
-      );
-    });
-
-    // Update in MongoDB
-    const mongoDB = connectionPool.getMongoDatabase();
-    await mongoDB.collection('accounts').updateOne(
-      { id: accountId },
-      {
-        $set: {
-          status: status,
-          updatedAt: new Date()
-        }
-      }
-    );
-
-    const updatedAccount = {
-      ...account,
-      status,
-      updatedAt: new Date().toISOString()
-    };
-
-    // Publish status updated event
-    await kafkaService.produce('account-events', {
-      eventType: 'ACCOUNT_STATUS_UPDATED',
-      accountId: accountId,
-      previousStatus: account.status,
-      newStatus: status,
-      timestamp: new Date().toISOString()
-    });
-
-    return updatedAccount;
-  } catch (error) {
-    logger.error('Error updating account status:', error);
-    throw error;
-  }
-}
-
 // Initialize service
 async function initializeService() {
   try {
     await connectionPool.initialize();
     await kafkaService.initialize();
+    await accountService.initialize();
 
     logger.info(`Account Service started on port ${PORT}`);
   } catch (error) {
@@ -446,6 +571,21 @@ async function initializeService() {
     process.exit(1);
   }
 }
+
+// Graceful shutdown
+process.on('SIGTERM', async () => {
+  logger.info('SIGTERM received, shutting down gracefully');
+  await connectionPool.close();
+  await kafkaService.close();
+  process.exit(0);
+});
+
+process.on('SIGINT', async () => {
+  logger.info('SIGINT received, shutting down gracefully');
+  await connectionPool.close();
+  await kafkaService.close();
+  process.exit(0);
+});
 
 app.listen(PORT, () => {
   initializeService();
